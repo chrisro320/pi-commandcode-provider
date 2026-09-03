@@ -244,6 +244,9 @@ export function createStreamCommandCode(deps: CoreDependencies) {
           env: deps.env,
           authPaths: deps.authPaths,
           homeDir: deps.homeDir,
+          envNames: deps.envNames,
+          slots: deps.slots,
+          allowLegacyGlobal: deps.allowLegacyGlobal,
         }),
       )
 

@@ -28,6 +28,19 @@ interface RegisterQuotaCommandOptions {
   headers?: Record<string, string>
   getConfiguredKey?: () => string | undefined
   fetchQuota?: typeof fetchCommandCodeQuota
+  /**
+   * Multi-account fork: register one command per account. `provider` is the
+   * OMP credential slot queried via the model registry; `commandName` is the
+   * slash command (primary keeps `commandcode-quota`); `configuredKey` scopes
+   * the auth-file/env fallback to that account. When omitted, behaves like
+   * upstream: a single primary command.
+   */
+  accounts?: readonly {
+    provider: string
+    commandName: string
+    label: string
+    configuredKey?: () => string | undefined
+  }[]
 }
 
 export function registerCommandCodeQuota(
@@ -37,30 +50,37 @@ export function registerCommandCodeQuota(
   const getConfiguredKey = options.getConfiguredKey ?? getConfiguredApiKey
   const fetchQuota = options.fetchQuota ?? fetchCommandCodeQuota
 
-  pi.registerCommand("commandcode-quota", {
-    description: "Show Command Code account usage and quota",
-    handler: async (_args, ctx) => {
-      await ctx.waitForIdle?.()
-      const registryKey = await ctx.modelRegistry?.getApiKeyForProvider?.("commandcode")
-      const apiKey = pickCommandCodeApiKey(registryKey, getConfiguredKey())
-      if (!apiKey) {
-        ctx.ui.notify(
-          "Command Code quota requires an API key. Run /login and select Command Code, or set COMMAND_CODE_API_KEY.",
-          "warning",
-        )
-        return
-      }
+  const accounts = options.accounts ?? [
+    { provider: "commandcode", commandName: "commandcode-quota", label: "Command Code" },
+  ]
 
-      const result = await fetchQuota({
-        apiKey,
-        baseUrl: options.apiBase,
-        extraHeaders: options.headers,
-      })
-      if (!result.ok) {
-        ctx.ui.notify(redactValue(result.error.message), "error")
-        return
-      }
-      ctx.ui.notify(formatQuota(result.quota), "info")
-    },
-  })
+  for (const account of accounts) {
+    pi.registerCommand(account.commandName, {
+      description: `Show ${account.label} account usage and quota`,
+      handler: async (_args, ctx) => {
+        await ctx.waitForIdle?.()
+        const registryKey = await ctx.modelRegistry?.getApiKeyForProvider?.(account.provider)
+        const fallbackKey = (account.configuredKey ?? getConfiguredKey)()
+        const apiKey = pickCommandCodeApiKey(registryKey, fallbackKey)
+        if (!apiKey) {
+          ctx.ui.notify(
+            `${account.label} quota requires an API key. Run /login and select ${account.label}, or set its COMMAND_CODE_API_KEY.`,
+            "warning",
+          )
+          return
+        }
+
+        const result = await fetchQuota({
+          apiKey,
+          baseUrl: options.apiBase,
+          extraHeaders: options.headers,
+        })
+        if (!result.ok) {
+          ctx.ui.notify(redactValue(result.error.message), "error")
+          return
+        }
+        ctx.ui.notify(formatQuota(result.quota), "info")
+      },
+    })
+  }
 }

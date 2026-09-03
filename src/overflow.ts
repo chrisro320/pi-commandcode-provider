@@ -1,4 +1,4 @@
-const COMMAND_CODE_PROVIDER = "commandcode"
+import { isCommandCodeProvider } from "./accounts.ts"
 const CONTEXT_OVERFLOW_PREFIX = "context_length_exceeded:"
 
 const COMMAND_CODE_OVERFLOW_PATTERNS = [
@@ -109,7 +109,7 @@ export function normalizeCommandCodeMessage<T extends CommandCodeMessageLike>(
   modelProvider?: string,
 ): { message: T & { errorMessage: string } } | undefined {
   if (message.role !== "assistant" || message.stopReason !== "error") return undefined
-  if (message.provider !== COMMAND_CODE_PROVIDER && modelProvider !== COMMAND_CODE_PROVIDER) {
+  if (!isCommandCodeProvider(message.provider) && !isCommandCodeProvider(modelProvider)) {
     return undefined
   }
 

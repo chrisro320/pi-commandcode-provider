@@ -29,8 +29,17 @@ export interface CommandCodeRuntimeOptions<TProviderConfig> {
   loadModels: (signal: AbortSignal) => Promise<LoadCommandCodeModelsResult>
   /** Cached catalog only; resolves to an empty list when no valid cache exists. */
   loadCachedModels: () => Promise<readonly CommandCodeModel[]>
-  createProviderConfig: (models: readonly CommandCodeModel[]) => TProviderConfig
+  /** `providerName` is the OMP slot this config is registered under. */
+  createProviderConfig: (models: readonly CommandCodeModel[], providerName: string) => TProviderConfig
   getTransport?: () => "unknown" | "provider" | "generate"
+  /**
+   * Multi-account fork: every OMP provider name sharing this catalog. Each
+   * name is registered with its own `createProviderConfig(models)` result so
+   * `/login` credentials stay per-account. Defaults to ["commandcode"].
+   */
+  providerNames?: readonly string[]
+  /** Multi-account fork: per-provider transport, appended to status output. */
+  accountTransports?: () => readonly string[]
   now?: () => number
   logWarning?: (message: string) => void
 }
@@ -88,7 +97,10 @@ function formatTimestamp(timestamp: number | undefined): string {
   return timestamp === undefined ? "never" : new Date(timestamp).toISOString()
 }
 
-export function formatCommandCodeStatus(status: CommandCodeRuntimeStatus): string {
+export function formatCommandCodeStatus(
+  status: CommandCodeRuntimeStatus,
+  accountLines: readonly string[] = [],
+): string {
   const lines = [
     `transport: ${status.transport}`,
     `source: ${status.source}`,
@@ -98,6 +110,7 @@ export function formatCommandCodeStatus(status: CommandCodeRuntimeStatus): strin
     `cache path: ${status.cachePath}`,
     `endpoint: ${redactEndpoint(status.endpoint)}`,
     `refresh: ${status.refreshing ? "in progress" : "idle"}`,
+    ...accountLines,
   ]
 
   lines.push(`warning: ${status.warning ? redactDiagnosticText(status.warning) : "none"}`)
@@ -150,8 +163,7 @@ export class CommandCodeRuntime<TProviderConfig, TContext extends CommandCodeCom
       return
     }
 
-    this.pi.registerProvider("commandcode", this.options.createProviderConfig(cached))
-    this.providerRegistered = true
+    this.registerProviders(cached)
     this.status = {
       ...this.status,
       source: "cache",
@@ -159,6 +171,18 @@ export class CommandCodeRuntime<TProviderConfig, TContext extends CommandCodeCom
       lastSuccess: this.now(),
     }
     void this.refresh()
+  }
+
+  /** Registers the same catalog under every account's provider name. */
+  private registerProviders(models: readonly CommandCodeModel[]): void {
+    for (const name of this.providerNames()) {
+      this.pi.registerProvider(name, this.options.createProviderConfig(models, name))
+    }
+    this.providerRegistered = true
+  }
+
+  private providerNames(): readonly string[] {
+    return this.options.providerNames ?? ["commandcode"]
   }
 
   /** Aborts any background refresh so a stopping host does not wait for the network. */
@@ -193,8 +217,7 @@ export class CommandCodeRuntime<TProviderConfig, TContext extends CommandCodeCom
         (this.status.modelCount === 0 && loaded.models.length > 0)
 
       if (shouldRegister) {
-        this.pi.registerProvider("commandcode", this.options.createProviderConfig(loaded.models))
-        this.providerRegistered = true
+        this.registerProviders(loaded.models)
 
         if (loaded.models.length === 0) {
           const preservedWarning = warning ?? "Model catalog refresh returned no models"
@@ -303,7 +326,9 @@ export class CommandCodeRuntime<TProviderConfig, TContext extends CommandCodeCom
       description: "Show redacted Command Code provider diagnostics",
       handler: async (_args, ctx) => {
         const status = this.getStatus()
-        ctx.ui.notify(formatCommandCodeStatus(status), status.warning ? "warning" : "info")
+        const accountLines = this.options.accountTransports?.() ?? []
+        const message = formatCommandCodeStatus(status, accountLines)
+        ctx.ui.notify(message, status.warning ? "warning" : "info")
       },
     })
   }

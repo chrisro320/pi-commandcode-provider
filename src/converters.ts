@@ -103,14 +103,24 @@ export function getApiKey(
     env?: NodeJS.ProcessEnv
     authPaths?: readonly string[]
     homeDir?: () => string
+    /** Account-scoped env names; defaults to the primary COMMAND_CODE_API_KEY. */
+    envNames?: readonly string[]
+    /** Account-scoped auth.json slots; defaults to primary + legacy names. */
+    slots?: readonly string[]
+    /** Honor the bare legacy `apiKey` field (primary only). */
+    allowLegacyGlobal?: boolean
   } = {},
 ): string | undefined {
   const env = options.env ?? process.env
-  if (env.COMMAND_CODE_API_KEY) return env.COMMAND_CODE_API_KEY
-  if (env.COMMANDCODE_API_KEY) return env.COMMANDCODE_API_KEY
+  const envNames = options.envNames ?? ["COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"]
+  for (const name of envNames) {
+    if (env[name]) return env[name]
+  }
 
   const home = options.homeDir?.() ?? homedir()
   const authPaths = options.authPaths ?? defaultAuthPaths(home)
+  const slots = options.slots ?? ["commandcode", "command-code"]
+  const allowLegacyGlobal = options.allowLegacyGlobal ?? slots[0] === "commandcode"
 
   for (const authPath of authPaths) {
     try {
@@ -118,18 +128,20 @@ export function getApiKey(
       const parsed: unknown = JSON.parse(readFileSync(authPath, "utf-8"))
       if (!isRecord(parsed)) continue
 
-      // Legacy: direct apiKey or commandcode field.
-      const apiKey = stringValue(parsed.apiKey)
-      if (apiKey) return apiKey
-      const commandcode = stringValue(parsed.commandcode)
-      if (commandcode) return commandcode
+      // Legacy: bare global apiKey field (primary account only).
+      if (allowLegacyGlobal) {
+        const apiKey = stringValue(parsed.apiKey)
+        if (apiKey) return apiKey
+      }
 
       // pi stores OAuth credentials as {"commandcode": {"type":"oauth","access":"..."}}.
       // The official Command Code CLI stores API credentials under "command-code".
-      const providerKey =
-        apiKeyFromCredentialRecord(parsed.commandcode) ??
-        apiKeyFromCredentialRecord(parsed["command-code"])
-      if (providerKey) return providerKey
+      for (const slot of slots) {
+        const direct = stringValue(parsed[slot])
+        if (direct) return direct
+        const providerKey = apiKeyFromCredentialRecord(parsed[slot])
+        if (providerKey) return providerKey
+      }
     } catch {
       // Ignore malformed or unreadable auth files.
     }

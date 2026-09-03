@@ -207,4 +207,10 @@ export interface CoreDependencies {
   homeDir?: () => string
   /** Injectable delay for retry backoff. Defaults to setTimeout. */
   delay?: (ms: number, signal: AbortSignal) => Promise<void>
+  /** Account-scoped env var names for key resolution (multi-account fork). */
+  envNames?: readonly string[]
+  /** Account-scoped auth.json slots (e.g. ["commandcode-b"]). */
+  slots?: readonly string[]
+  /** Honor the bare legacy global apiKey field. Primary account only. */
+  allowLegacyGlobal?: boolean
 }

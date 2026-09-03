@@ -3,6 +3,12 @@
  *
  * Uses Command Code's documented Provider API:
  * https://api.commandcode.ai/provider/v1
+ *
+ * Multi-account fork: `COMMANDCODE_ACCOUNTS=b,c` registers additional
+ * `commandcode-b` / `commandcode-c` OMP providers sharing this catalog. Each
+ * account gets its own credential slot (`/login` per provider), its own
+ * env/auth-file key scope, its own custom API name, and its own transport
+ * router — selecting a model selects the account.
  */
 
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai"
@@ -17,6 +23,7 @@ import {
 import { join } from "node:path"
 
 import { getConfiguredApiKey } from "./src/api-key.ts"
+import { parseAccounts, type CommandCodeAccount } from "./src/accounts.ts"
 import { pickCommandCodeApiKey, withResolvedCommandCodeApiKey } from "./src/converters.ts"
 import { createStreamCommandCode } from "./src/core.ts"
 import { calculateCommandCodeCost } from "./src/cost.ts"
@@ -60,11 +67,14 @@ function compatApiProviderRegistrar(): ((...args: unknown[]) => unknown) | undef
   return typeof register === "function" ? (register as (...args: unknown[]) => unknown) : undefined
 }
 
-function registerCompatApiProvider(stream: CompatStreamFunction): void {
-  compatApiProviderRegistrar()?.(
-    { api: COMMAND_CODE_API, stream, streamSimple: stream },
-    COMPAT_SOURCE_ID,
-  )
+/**
+ * The custom API id for one account. OMP's `registerCustomApi` stores ONE
+ * stream function per api name (`customApiRegistry.set`), so accounts must
+ * not share `commandcode-custom` — the last registration would serve every
+ * account's models and defeat per-account transports.
+ */
+function apiIdForAccount(account: CommandCodeAccount): string {
+  return account.primary ? COMMAND_CODE_API : `${COMMAND_CODE_API}${account.commandSuffix}`
 }
 
 /**
@@ -82,13 +92,18 @@ function registerCompatApiProvider(stream: CompatStreamFunction): void {
  * a real key is configured; OMP then reads env keys and stored credentials
  * itself.
  *
+ * Multi-account fork: key resolution is scoped to the account (its env names
+ * and auth.json slots only — an alias never reads the primary's key), so
+ * per-provider `/login` credentials cannot be shadowed cross-account.
+ *
  * Hosts are told apart by the same `registerApiProvider` probe used for the
  * compat registry: pi exports it, OMP does not.
  */
-function providerApiKey(): string | undefined {
-  const configured = pickCommandCodeApiKey(getConfiguredApiKey(), undefined)
+function providerApiKey(account: CommandCodeAccount, configuredKey: () => string | undefined) {
+  const onPi = compatApiProviderRegistrar() !== undefined
+  const configured = pickCommandCodeApiKey(configuredKey(), undefined)
   if (configured) return configured
-  return compatApiProviderRegistrar() ? "$COMMAND_CODE_API_KEY" : undefined
+  return onPi ? `$${account.envNames[0]}` : undefined
 }
 
 function commandCodeHeaders(): Record<string, string> | undefined {
@@ -99,20 +114,26 @@ function commandCodeHeaders(): Record<string, string> | undefined {
 }
 
 function createProviderConfig(
+  account: CommandCodeAccount,
   models: readonly CommandCodeModel[],
   apiBase: string,
   streamCommandCode: ProviderConfig["streamSimple"],
+  configuredKey: () => string | undefined,
 ): ProviderConfig {
   const headers = commandCodeHeaders()
+  const api = apiIdForAccount(account)
+  const displayName = account.primary
+    ? "Command Code"
+    : `Command Code (${account.provider})`
   return {
-    name: "Command Code",
+    name: displayName,
     baseUrl: apiBase,
-    apiKey: providerApiKey(),
-    api: COMMAND_CODE_API,
+    apiKey: providerApiKey(account, configuredKey),
+    api,
     streamSimple: streamCommandCode,
     headers,
     oauth: {
-      name: "Command Code",
+      name: displayName,
       login,
       refreshToken,
       getApiKey: getOAuthApiKey,
@@ -120,7 +141,7 @@ function createProviderConfig(
     models: models.map((model) => ({
       id: model.id,
       name: model.name,
-      api: COMMAND_CODE_API,
+      api,
       baseUrl: baseUrlForModel(apiBase, model.api),
       reasoning: model.reasoning,
       ...(thinkingMetadataForModel(model.id) ?? {}),
@@ -152,41 +173,81 @@ function legacyApiBase(providerApiBase: string): string {
   return providerApiBase.replace(/\/provider\/v1\/?$/, "")
 }
 
+interface AccountRoute {
+  account: CommandCodeAccount
+  configuredKey: () => string | undefined
+  transport: ReturnType<typeof createCommandCodeTransportRouter>
+}
+
 export default async function (pi: ExtensionAPI) {
   const apiBase = process.env.COMMANDCODE_API_BASE ?? DEFAULT_PROVIDER_API_BASE
   const modelsUrl = process.env.COMMANDCODE_MODELS_URL ?? DEFAULT_MODELS_URL
   const modelsTimeoutMs = getModelsTimeoutMs()
   const modelsCachePath =
     process.env.COMMANDCODE_MODELS_CACHE ?? join(getAgentDir(), "commandcode-models.json")
-  const streamGenerate = createStreamCommandCode({
-    createStream: () => new AssistantMessageEventStream(),
-    calculateCost: calculateCommandCodeCost,
-    apiBase: legacyApiBase(apiBase),
+  const accounts = parseAccounts()
+
+  // One transport router + generate stream + key scope per account. Transports
+  // must not be shared: the router memoizes the last (apiKey → transport)
+  // selection, and mixing accounts would misroute Go-plan fallback requests.
+  const routes: readonly AccountRoute[] = accounts.map((account) => {
+    const slots = account.primary ? ["commandcode", "command-code"] : [account.provider]
+    const configuredKey = () =>
+      getConfiguredApiKey({
+        envNames: account.envNames,
+        slots,
+        allowLegacyGlobal: account.primary,
+      })
+    const resolveStreamOptions = (options?: Parameters<typeof streamNativeProvider>[2]) =>
+      withResolvedCommandCodeApiKey(options, configuredKey())
+    const streamGenerate = createStreamCommandCode({
+      createStream: () => new AssistantMessageEventStream(),
+      calculateCost: calculateCommandCodeCost,
+      apiBase: legacyApiBase(apiBase),
+      envNames: account.envNames,
+      slots,
+      allowLegacyGlobal: account.primary,
+    })
+    const transport = createCommandCodeTransportRouter({
+      createStream: () => new AssistantMessageEventStream(),
+      streamProvider: (model, context, options) =>
+        streamNativeProvider(
+          { ...model, api: apiForModelId(model.id), compat: model.compatConfig ?? model.compat },
+          context,
+          resolveStreamOptions(options),
+        ),
+      streamGenerate: (model, context, options) =>
+        streamGenerate(model, context, resolveStreamOptions(options)),
+    })
+    return { account, configuredKey, transport }
   })
-  const resolveStreamOptions = (options?: Parameters<typeof streamNativeProvider>[2]) =>
-    withResolvedCommandCodeApiKey(options, getConfiguredApiKey())
-  const transport = createCommandCodeTransportRouter({
-    createStream: () => new AssistantMessageEventStream(),
-    streamProvider: (model, context, options) =>
-      streamNativeProvider(
-        { ...model, api: apiForModelId(model.id), compat: model.compatConfig ?? model.compat },
-        context,
-        resolveStreamOptions(options),
-      ),
-    streamGenerate: (model, context, options) =>
-      streamGenerate(model, context, resolveStreamOptions(options)),
-  })
+  const routeByProvider = new Map(routes.map((route) => [route.account.provider, route]))
+  const primaryRoute = routeByProvider.get("commandcode")
+  if (!primaryRoute) throw new Error("internal: primary Command Code route missing")
 
   // pi dispatches the main chat through the registered provider, but sibling
   // extensions that call `streamSimple` from `@earendil-works/pi-ai/compat`
   // with a Command Code model resolve `model.api` through the compat
-  // api-registry, which knows nothing about extension providers. Register the
-  // custom api there so those calls reach the same transport. The registry
-  // resolves no credentials for extension providers, so fall back to the
-  // configured key when the caller passes none or a placeholder.
-  const compatStream: CompatStreamFunction = (model, context, options) =>
-    transport.stream(model, context, resolveStreamOptions(options)) as AssistantMessageEventStream
-  registerCompatApiProvider(compatStream)
+  // api-registry, which knows nothing about extension providers. Register each
+  // account's custom api so those calls reach that account's transport. The
+  // registry resolves no credentials for extension providers, so fall back to
+  // the account-scoped configured key when the caller passes none or a
+  // placeholder.
+  const registrar = compatApiProviderRegistrar()
+  if (registrar) {
+    for (const route of routes) {
+      const compatStream: CompatStreamFunction = (model, context, options) =>
+        route.transport.stream(
+          model,
+          context,
+          withResolvedCommandCodeApiKey(options, route.configuredKey()),
+        ) as AssistantMessageEventStream
+      registrar(
+        { api: apiIdForAccount(route.account), stream: compatStream, streamSimple: compatStream },
+        COMPAT_SOURCE_ID,
+      )
+    }
+  }
 
   pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return
@@ -197,6 +258,14 @@ export default async function (pi: ExtensionAPI) {
   registerCommandCodeQuota(pi, {
     apiBase: legacyApiBase(apiBase),
     headers: commandCodeHeaders(),
+    accounts: routes.map((route) => ({
+      provider: route.account.provider,
+      commandName: `commandcode-quota${route.account.commandSuffix}`,
+      label: route.account.primary
+        ? "Command Code"
+        : `Command Code ${route.account.commandSuffix.replace(/^-/, "")}`,
+      configuredKey: route.configuredKey,
+    })),
   })
 
   const runtime = createCommandCodeRuntime<ProviderConfig, ExtensionCommandContext>(pi, {
@@ -210,8 +279,22 @@ export default async function (pi: ExtensionAPI) {
         signal,
       }),
     loadCachedModels: () => loadCachedCommandCodeModels(modelsCachePath),
-    createProviderConfig: (models) => createProviderConfig(models, apiBase, transport.stream),
-    getTransport: transport.getTransport,
+    createProviderConfig: (models, providerName) => {
+      const route = routeByProvider.get(providerName) ?? primaryRoute
+      return createProviderConfig(
+        route.account,
+        models,
+        apiBase,
+        route.transport.stream,
+        route.configuredKey,
+      )
+    },
+    getTransport: primaryRoute.transport.getTransport,
+    providerNames: accounts.map((account) => account.provider),
+    accountTransports: () =>
+      routes.map(
+        (route) => `transport ${route.account.provider}: ${route.transport.getTransport()}`,
+      ),
   })
 
   pi.on("session_shutdown", () => {

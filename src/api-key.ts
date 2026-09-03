@@ -26,19 +26,38 @@ function apiKeyFromCredential(value: unknown): string | undefined {
   return stringValue(value.access) ?? stringValue(value.key)
 }
 
+/**
+ * Slots consulted in `auth.json`, primary first. The upstream reader accepts
+ * `commandcode` and the legacy `command-code` key; account aliases add their
+ * own provider-name slot (e.g. `commandcode-b`). The bare `apiKey` field is a
+ * legacy global and is only honored for the primary account.
+ */
+export interface ConfiguredApiKeyOptions {
+  env?: NodeJS.ProcessEnv
+  authPaths?: readonly string[]
+  homeDir?: () => string
+  /** Env var names consulted before the auth-file slots (account-scoped). */
+  envNames?: readonly string[]
+  /** auth.json slots consulted, in order (account-scoped). */
+  slots?: readonly string[]
+  /** Honor the bare legacy `apiKey` field (primary only). */
+  allowLegacyGlobal?: boolean
+}
+
 export function getConfiguredApiKey(
-  options: {
-    env?: NodeJS.ProcessEnv
-    authPaths?: readonly string[]
-    homeDir?: () => string
-  } = {},
+  options: ConfiguredApiKeyOptions = {},
 ): string | undefined {
   const env = options.env ?? process.env
-  if (env.COMMAND_CODE_API_KEY) return env.COMMAND_CODE_API_KEY
-  if (env.COMMANDCODE_API_KEY) return env.COMMANDCODE_API_KEY
+  const envNames = options.envNames ?? ["COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"]
+  for (const name of envNames) {
+    const value = env[name]
+    if (value) return value
+  }
 
   const home = options.homeDir?.() ?? homedir()
   const authPaths = options.authPaths ?? defaultAuthPaths(home)
+  const slots = options.slots ?? ["commandcode", "command-code"]
+  const allowLegacyGlobal = options.allowLegacyGlobal ?? slots[0] === "commandcode"
 
   for (const authPath of authPaths) {
     try {
@@ -46,20 +65,17 @@ export function getConfiguredApiKey(
       const parsed: unknown = JSON.parse(readFileSync(authPath, "utf-8"))
       if (!isRecord(parsed)) continue
 
-      const apiKey = stringValue(parsed.apiKey)
-      if (apiKey) return apiKey
+      if (allowLegacyGlobal) {
+        const apiKey = stringValue(parsed.apiKey)
+        if (apiKey) return apiKey
+      }
 
-      const commandcode = stringValue(parsed.commandcode)
-      if (commandcode) return commandcode
-
-      const providerKey = apiKeyFromCredential(parsed.commandcode)
-      if (providerKey) return providerKey
-
-      const commandCode = stringValue(parsed["command-code"])
-      if (commandCode) return commandCode
-
-      const commandCodeKey = apiKeyFromCredential(parsed["command-code"])
-      if (commandCodeKey) return commandCodeKey
+      for (const slot of slots) {
+        const direct = stringValue(parsed[slot])
+        if (direct) return direct
+        const providerKey = apiKeyFromCredential(parsed[slot])
+        if (providerKey) return providerKey
+      }
     } catch {
       // Ignore malformed or unreadable auth files.
     }
