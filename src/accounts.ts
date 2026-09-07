@@ -34,7 +34,10 @@ export interface CommandCodeAccount {
 }
 
 function normalizeProviderSlug(raw: string): string {
-  const slug = raw.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "")
+  const slug = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "")
   if (!slug) return ""
   return slug.startsWith("commandcode") ? slug : `commandcode-${slug}`
 }
@@ -81,4 +84,40 @@ export function parseAccounts(env: NodeJS.ProcessEnv = process.env): CommandCode
 export function isCommandCodeProvider(provider: string | undefined): boolean {
   if (!provider) return false
   return provider === PRIMARY_PROVIDER || provider.startsWith(`${PRIMARY_PROVIDER}-`)
+}
+
+/**
+ * Credential scope for one `COMMANDCODE_ACCOUNTS` slug without parsing the
+ * whole env list. `b` → provider `commandcode-b` with its own env names and
+ * auth slot; the primary slug (`commandcode`) resolves the primary scope.
+ * Used by the key pool so a slug entry reuses exactly the scopes that
+ * per-account /login writes.
+ */
+export function accountForSlug(slug: string): Pick<
+  CommandCodeAccount,
+  "provider" | "commandSuffix" | "primary" | "envNames"
+> & {
+  slots: readonly string[]
+} {
+  const normalized = normalizeProviderSlug(slug)
+  if (!normalized || normalized === PRIMARY_PROVIDER) {
+    return {
+      provider: PRIMARY_PROVIDER,
+      commandSuffix: "",
+      primary: true,
+      envNames: ["COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"],
+      slots: [PRIMARY_PROVIDER, "command-code"],
+    }
+  }
+  const suffix = normalized
+    .slice("commandcode-".length)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "_")
+  return {
+    provider: normalized,
+    commandSuffix: `-${normalized.slice("commandcode-".length)}`,
+    primary: false,
+    envNames: [`COMMAND_CODE_API_KEY_${suffix}`, `COMMANDCODE_API_KEY_${suffix}`],
+    slots: [normalized],
+  }
 }

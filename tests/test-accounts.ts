@@ -27,10 +27,7 @@ describe("parseAccounts()", () => {
     assert.deepEqual(short, full)
     assert.equal(short[1]?.provider, "commandcode-b")
     assert.equal(short[1]?.commandSuffix, "-b")
-    assert.deepEqual(short[1]?.envNames, [
-      "COMMAND_CODE_API_KEY_B",
-      "COMMANDCODE_API_KEY_B",
-    ])
+    assert.deepEqual(short[1]?.envNames, ["COMMAND_CODE_API_KEY_B", "COMMANDCODE_API_KEY_B"])
   })
 
   it("dedupes and keeps the primary first", () => {

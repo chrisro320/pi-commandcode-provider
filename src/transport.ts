@@ -39,7 +39,19 @@ async function isUpgradeRequired(response: Response): Promise<boolean> {
   }
 }
 
-export function createCommandCodeTransportRouter(deps: TransportDependencies) {
+export interface CommandCodeTransportRouter {
+  getTransport(): CommandCodeTransport
+  reset(): void
+  stream(
+    model: ModelLike,
+    context: ContextLike,
+    options?: StreamOptions,
+  ): AssistantMessageEventStreamLike
+}
+
+export function createCommandCodeTransportRouter(
+  deps: TransportDependencies,
+): CommandCodeTransportRouter {
   let transport: CommandCodeTransport = "unknown"
   let apiKey: string | undefined
 
